@@ -10,8 +10,12 @@
 #include <lwip/err.h>
 #include <lwip/sys.h>
 #include <netdb.h>
+#include "config.h"
 
+const char* ssid = WLAN_SSID; // edit config.h
+const char* password = WLAN_PASS;  //edit config.h
 
+// connects to listener, forwards input to target
 int createReverseTcpTunnel(const char* targetServer, int targetPort,  const char* listenerServer, int listenerPort)
 {
   int targetSock = -1;
@@ -60,6 +64,7 @@ int createReverseTcpTunnel(const char* targetServer, int targetPort,  const char
 
   Serial.printf("Tunneling TCP %s:%d -> %s:%d\n", targetIP, targetPort, listenerIP, listenerPort);
 
+  /* Create the sockets */
   targetSock = socket(AF_INET, SOCK_STREAM, 0);
   listenerSock = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -154,64 +159,6 @@ int createReverseTcpTunnel(const char* targetServer, int targetPort,  const char
   return 0;
 }
 
-
-/*
-char m_server[255];
-char m_client[256];
-int m_port;
-int m_port_client;
-
-char server_buffer[256];
-char client_buffer[256];
-int sockfd_server = -1;
-int sockfd_client = -1;
-
-
-TaskHandle_t server_client_task = NULL;
-TaskHandle_t client_server_task = NULL;
-bool running;
-
-int create_socket(char *_server, int _port) {
-  int sockfd;
-  struct sockaddr_in serverSockAddr = {};
-  struct hostent *he = NULL;
-  if ( (he = gethostbyname(_server)) == NULL) 
-  {
-    return -1;
-  }
-  memcpy(&serverSockAddr.sin_addr, he->h_addr, sizeof(serverSockAddr));
-
-  char str[INET_ADDRSTRLEN];
-  // now get it back and print it
-  inet_ntop(AF_INET, &(serverSockAddr.sin_addr), str, INET_ADDRSTRLEN);
-
-  Serial.println(str);
-
-  serverSockAddr.sin_port = htons(_port);
-  serverSockAddr.sin_family = AF_INET;
-
-  sockfd = socket(AF_INET, SOCK_STREAM, 0);
-  if(sockfd < 0) {
-    Serial.println("Fock-et.");
-    return -1;
-  }
-
-  if(connect(sockfd, (struct sockaddr*)&serverSockAddr, sizeof(serverSockAddr)) < 0) {
-    Serial.println("Connection failed.");
-    return -1;
-  }
-
-  Serial.println("BANANEN BOOT!");
-  Serial.println(sockfd);
-
-  return sockfd;
-
-}
-
-*/
-const char* ssid = "Ziggo8152006";
-const char* password = "wxNdqksw4xfc";
-
 void setup() {
 
   // Start serial
@@ -229,48 +176,7 @@ void setup() {
 }
 
 void loop() {
-/*
-   // put your setup code here, to run once:
-  int kerneliumSock = create_socket((char*)"95.179.129.108", 1337);
-  int albertheijn = create_socket("captive.apple.com", 80);
-  if (kerneliumSock == -1) {
-    Serial.println("Failed to connect to kernelium.com.");
-    delay(60000);
-    return;
-  }
-  if(albertheijn == -1) {
-    Serial.println("Failed to connect to albert heijn network.");
-     delay(60000);
-    return;
-  }
-
-  uint32_t packetSize = 0;
-  while(read(kerneliumSock, &packetSize, sizeof(packetSize)) != sizeof(uint32_t) && packetSize != 0) {
-
-  }
-
-  unsigned int chunks = packetSize / 4096;
-  if(packetSize % 4096) {
-    chunks++;
-  }
-
-  for(int i = 0; i < chunks; i++) {
-    char* buffer = (char*)malloc(4096);
-    bzero(buffer, 4096);
-    read(kerneliumSock, buffer, 4096);
-    write(albertheijn, buffer, 4096);
-    free(buffer);
-    buffer = NULL;
-  }
-
-    
-
-  close(kerneliumSock);
-  close(albertheijn);
-
-  delay(60000);
- */
-
+  Serial.println("Starting TCP tunnel.\n");
   int err = createReverseTcpTunnel("ah.nl", 443, "95.179.129.108", 1337);
-
+  delay(1000);
 }
