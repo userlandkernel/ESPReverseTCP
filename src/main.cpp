@@ -31,6 +31,10 @@ int createReverseTcpTunnel(const char* targetServer, int targetPort,  const char
     return -1;
   }
 
+  memcpy(&targetServerAddr.sin_addr, targetServerHE->h_addr, sizeof(targetServerAddr));
+
+  delay(100);
+
   /* Try to resolve the DNS name of the listener server */
   if ((listenerServerHE = gethostbyname(listenerServer)) == NULL) {
     Serial.println("DNS resolution failed for listener server.\n");
@@ -38,8 +42,7 @@ int createReverseTcpTunnel(const char* targetServer, int targetPort,  const char
   }
 
   Serial.println("Setting up socket address.\n");
-  memcpy(&targetServerAddr.sin_addr, targetServerHE->h_addr, sizeof(targetServerAddr));
-
+ 
   memcpy(&listenerServerAddr.sin_addr, listenerServerHE->h_addr, sizeof(listenerServerAddr));
 
     // Setup socket addresses
@@ -79,9 +82,12 @@ int createReverseTcpTunnel(const char* targetServer, int targetPort,  const char
       attempt++;
       if(attempt < 3) {
         Serial.println("Retrying...");
+        continue;
       }
       else {
         Serial.println("Failed to connect to listener server: Maximum retries exceeded, giving up.");
+        close(targetSock);
+        close(listenerSock);
         return -1;
       }
       delay(5000); // Wait 5 seconds, then retry
@@ -102,6 +108,8 @@ int createReverseTcpTunnel(const char* targetServer, int targetPort,  const char
       }
       else {
         Serial.println("Failed to connect to target server: Maximum retries exceeded, giving up.");
+        close(targetSock);
+        close(listenerSock);
         return -1;
       }
       delay(5000); // Wait 5 seconds, then retry
@@ -110,10 +118,22 @@ int createReverseTcpTunnel(const char* targetServer, int targetPort,  const char
     break;
   }
 
-  // Keep reading from listener server until no data has been received
-  while(read(listenerSock, listenerDataBuffer, sizeof(listenerDataBuffer))) {
-    // Forward the request to the target server
-    Serial.println("Received data chunk from listener, forwarding it...");
+  uint32_t packetSize = 0;
+  while(read(listenerSock, &packetSize, sizeof(packetSize)) != sizeof(uint32_t)) {
+
+  }
+  Serial.printf("Got packet of %d bytes..\n", packetSize);
+  unsigned int chunks = packetSize / sizeof(listenerDataBuffer);
+  if(packetSize % sizeof(listenerDataBuffer)) {
+    chunks++;
+  }
+
+  Serial.printf("Receiving and forwarding %d chunks...\n", chunks);
+  for(int i = 0; i < chunks; i++) {
+    bzero(listenerDataBuffer, sizeof(listenerDataBuffer));
+    Serial.printf("Receiving chunk %d/%d...\n", i, chunks);
+    read(listenerSock, listenerDataBuffer, sizeof(listenerDataBuffer));
+    Serial.printf("Forwarding chunk %d/%d...\n", i, chunks);
     write(targetSock, listenerDataBuffer, sizeof(listenerDataBuffer));
   }
 
@@ -243,10 +263,7 @@ void loop() {
     buffer = NULL;
   }
 
-    while(read(albertheijn, server_buffer, sizeof(server_buffer))) {
-      write(kerneliumSock, server_buffer, sizeof(server_buffer));
-    }
-
+    
 
   close(kerneliumSock);
   close(albertheijn);
@@ -254,6 +271,6 @@ void loop() {
   delay(60000);
  */
 
-  int err = createReverseTcpTunnel("95.179.129.108", 1337, "google.com", 443);
+  int err = createReverseTcpTunnel("ah.nl", 443, "95.179.129.108", 1337);
 
 }
